@@ -4,7 +4,7 @@ import nodemailer from "nodemailer"
 import dotenv from "dotenv"
 dotenv.config();
 
-
+// this is my job that is done by worker here 
 export const startSentOtpConsumer = async()=>{
     try {
         const connection = await amqp.connect({

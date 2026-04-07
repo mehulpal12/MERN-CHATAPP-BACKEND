@@ -50,7 +50,7 @@ export const getAllChats = tryCatch(
 
     const chatWithUserData = await Promise.all(
       chats.map(async (chat) => {
-        const otherUserId = chat.users.find((id) => id !== userId);
+        const otherUserId = chat.users.find((id) => id.toString() !== userId.toString());
         const url = process.env.USER_SERVICE_URL as string;
             if(!url){
                 console.log("url is not found")
