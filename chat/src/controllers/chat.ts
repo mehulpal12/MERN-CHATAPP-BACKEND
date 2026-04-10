@@ -69,7 +69,7 @@ export const getAllChats = tryCatch(
           );
 
           return {
-            user: data,
+            user: data.user,
             chat: {
               ...chat.toObject(),
               latestMessage: chat.latestMessage || null,
@@ -90,7 +90,7 @@ export const getAllChats = tryCatch(
       }),
     );
     res.status(200).json({
-      message: "chats fetched successfully",
+      message: "chats fetched successfully 2",
       chats: chatWithUserData,
     });
   },
@@ -250,7 +250,7 @@ export const getMessagesbyChat = tryCatch(async(req:AuthenticatedRequest,res:Res
       message:"messages fetched successfully",
       messages,
       otherUserId,
-      user:data,
+      user:data.user,
     })
   }catch(err){
     console.log(err);
