@@ -172,12 +172,9 @@ export const sendMessage = tryCatch(async(req:AuthenticatedRequest,res:Response)
   // emit to socket
 
   res.status(201).json({
-    message:"message sent successfully",
-    sender:senderId,
-    text:latestMessageText,
-    chatId,
-    id:savedMessage._id,
-  })
+    message: "message sent successfully",
+    newMessage: savedMessage,
+  });
 })
 
 
