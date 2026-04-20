@@ -4,6 +4,7 @@ import type { AuthenticatedRequest } from "../middlewares/isAuth.js";
 import { Chat } from "../models/Chat.js";
 import { Messages } from "../models/messages.js";
 import axios from "axios";
+import { io, getReciverSocketId } from "../config/socket.js";
 
 export const createChat = tryCatch(
   async (req: AuthenticatedRequest, res: Response) => {
@@ -135,11 +136,22 @@ export const sendMessage = tryCatch(async(req:AuthenticatedRequest,res:Response)
 
   // socket.io setup
   
+  const recieverSocketId  = getReciverSocketId(otherUserId.toString());
+  let isRecieverInChatRoom = false
+
+  if(recieverSocketId){
+    const recieverSocket = io.sockets.sockets.get(recieverSocketId)
+    if(recieverSocket && recieverSocket.rooms.has(chatId)){
+      isRecieverInChatRoom = true
+    }
+  }
+
+  
   const messagePayload: any = {
     chatId,
     sender: senderId,
-    seen: false,
-    seenAt: undefined,
+    seen: isRecieverInChatRoom,
+    seenAt: isRecieverInChatRoom ? new Date() : undefined,
     text,
   };
 
@@ -170,6 +182,27 @@ export const sendMessage = tryCatch(async(req:AuthenticatedRequest,res:Response)
   }, {new:true})
 
   // emit to socket
+
+  io.to(chatId).emit("newMessage", savedMessage)
+
+  if(recieverSocketId){
+    io.to(recieverSocketId).emit("newMessage", savedMessage)
+  }
+
+  const senderSocketId = getReciverSocketId(senderId.toString())
+
+  if(senderSocketId){
+    io.to(senderSocketId).emit("newMessage", savedMessage)
+  }
+
+  if(isRecieverInChatRoom &&  senderSocketId){
+    io.to(senderSocketId).emit("messageSeen", {
+      chatId:chatId,
+      seenBy:otherUserId,
+      messageIds:[savedMessage._id]
+    })
+  }
+
 
   res.status(201).json({
     message: "message sent successfully",
@@ -211,45 +244,72 @@ export const getMessagesbyChat = tryCatch(async(req:AuthenticatedRequest,res:Res
     return;
   }
 
-  const messageToMarkSeen = await Messages.updateMany(
-    {
-      chatId,
-      sender:{$ne:userId},
-      seen:false,
-    },
-    {
-      $set:{
-        seen:true,
-        seenAt:new Date(),
-      },
+  const unseenMessages = await Messages.find({
+    chatId,
+    sender: { $ne: userId },
+    seen: false,
+  });
+
+  const messageIds = unseenMessages.map((msg) => msg._id.toString());
+
+  if (messageIds.length > 0) {
+    await Messages.updateMany(
+      { _id: { $in: messageIds } },
+      {
+        $set: {
+          seen: true,
+          seenAt: new Date(),
+        },
+      }
+    );
+
+    const otherUserId = chat.users.find((id) => id.toString() !== userId.toString());
+    if (otherUserId) {
+      const otherUserSocketId = getReciverSocketId(otherUserId.toString());
+      if (otherUserSocketId) {
+        io.to(otherUserSocketId).emit("messagesSeen", {
+          chatId,
+          seenBy: userId,
+          messageIds,
+        });
+      }
     }
-  )
+  }
 
-  const messages = await Messages.find({chatId}).sort({createdAt:1});
-  const otherUserId = chat.users.find((id)=>id.toString() !== userId.toString());
+  const messages = await Messages.find({ chatId }).sort({ createdAt: 1 });
+  const otherUserId = chat.users.find((id) => id.toString() !== userId.toString());
 
-  try{
-    const {data} = await axios.get(`${process.env.USER_SERVICE_URL}/api/v1/user/${otherUserId}`, {
+  try {
+    const { data } = await axios.get(`${process.env.USER_SERVICE_URL}/api/v1/user/${otherUserId}`, {
       headers: { Authorization: req.headers.authorization as string }
     });
 
-    if(!otherUserId){
+    if (!otherUserId) {
       res.status(400).json({
-        message:"other user not found",
+        message: "other user not found",
       })
       return;
     }
 
-    // socket work
 
+    if(unseenMessages.length>0){
+      const otherUserSocketId = getReciverSocketId(otherUserId.toString())
+      if(otherUserSocketId){
+        io.to(otherUserSocketId).emit("messagesSeen",{
+          chatId:chatId,
+          seenBy:userId,
+          messageIds: unseenMessages.map((msg) => msg._id)
+        })
+      }
+    }
 
     res.status(200).json({
-      message:"messages fetched successfully",
+      message: "messages fetched successfully",
       messages,
       otherUserId,
-      user:data.user,
+      user: data.user,
     })
-  }catch(err){
+  } catch (err) {
     console.log(err);
     res.status(500).json({
       message:"internal server error",
