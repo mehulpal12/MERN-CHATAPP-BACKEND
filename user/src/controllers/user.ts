@@ -3,112 +3,203 @@ import { publishToQueue } from "../config/rabbitmq.js";
 import tryCatch from "../config/tryCatch.js";
 import { redisClient } from "../index.js";
 import User from "../model/user.js";
+import crypto from "crypto";
 import type { Request, Response } from "express";
 import type { AuthenticatedRequest } from "../middlewares/isAuth.js";
 
+/**
+ * Generate secure OTP
+ */
+const generateOtp = () => {
+  return crypto.randomInt(100000, 999999).toString();
+};
+
+/**
+ * Hash OTP (never store plain OTP)
+ */
+const hashOtp = (otp: string) => {
+  return crypto.createHash("sha256").update(otp).digest("hex");
+};
+
+/**
+ * LOGIN (Send OTP)
+ */
 export const loginUser = tryCatch(async (req: Request, res: Response) => {
   const { email } = req.body;
+
+  if (!email) {
+    return res.status(400).json({ message: "Email is required" });
+  }
+
   const rateLimitKey = `otp:rateLimit:${email}`;
-  const rateLimit = await redisClient.get(rateLimitKey);
-  if (rateLimit) {
-    return res.status(429).json({ message: "Too many requests" });
-  }
-  let otp = Math.floor(1000 + Math.random() * 900000).toString();
-  console.log(otp);
-  if(otp.length < 6){
-    otp = otp.padStart(6);
-  }
   const otpKey = `otp:${email}`;
 
-  await redisClient.setEx(otpKey, 300, otp);
+  // Rate limiting
+  const isRateLimited = await redisClient.get(rateLimitKey);
+  if (isRateLimited) {
+    return res.status(429).json({
+      message: "Too many requests. Please try again after some time.",
+    });
+  }
 
-  await redisClient.set(rateLimitKey, "true", {
-    EX: 300,
+  // Generate OTP
+  const otp = generateOtp();
+  const hashedOtp = hashOtp(otp);
+
+  // Store hashed OTP (1 minutes)
+  await redisClient.setEx(otpKey, 60, hashedOtp);
+
+  // Rate limit (1 minutes)
+  await redisClient.set(rateLimitKey, "true", { EX: 60 });
+
+  // Send email via RabbitMQ
+  await publishToQueue("send_otp", {
+    to: email,
+    subject: "OTP for Login",
+    text: `Your OTP is ${otp}. It is valid for 5 minutes.`,
   });
 
-  const messageSend = {
-    to: email,
-    subject: "OTP for login",
-    text: `Your OTP is ${otp} is vaild for 5 minutes`,
-  };
-
-  await publishToQueue("send_otp", messageSend);
-
-  res.status(200).json({ message: "OTP sent successfully", messageSend });
+  return res.status(200).json({
+    message: `OTP sent successfully ${otp}`,
+  });
 });
 
+/**
+ * VERIFY OTP
+ */
 export const verifyUser = tryCatch(async (req: Request, res: Response) => {
   const { email, enteredOtp } = req.body;
 
-  const otp: string | null = await redisClient.get(`otp:${email}`);
   if (!email || !enteredOtp) {
-    return res.status(400).json({ message: "Please provide all the details" });
+    return res
+      .status(400)
+      .json({ message: "Email and OTP are required" });
   }
-  if (otp !== enteredOtp) {
-    return res.status(400).json({ message: "Invalid OTP" });
-  }
-  await redisClient.del(`otp:${email}`);
 
-  const user = await User.findOne({ email });
+  const otpKey = `otp:${email}`;
+  const storedOtp = await redisClient.get(otpKey);
+
+  if (!storedOtp) {
+    return res.status(400).json({
+      message: "OTP expired or not found",
+    });
+  }
+
+  const hashedEnteredOtp = hashOtp(enteredOtp);
+
+  if (storedOtp !== hashedEnteredOtp) {
+    return res.status(400).json({
+      message: "Invalid OTP",
+    });
+  }
+
+  // OTP is valid → delete it
+  await redisClient.del(otpKey);
+
+  // Check user
+  let user = await User.findOne({ email });
+
   if (!user) {
     const name = email.split("@")[0];
-    const newUser = await User.create({ email, name });
-    const token = generateToken(newUser);
-    return res
-      .status(200)
-      .json({ message: "User created successfully", newUser, token });
+    user = await User.create({ email, name });
   }
+
   const token = generateToken(user);
-  res.json({ message: "User verified successfully", token, user });
+
+  return res.status(200).json({
+    message: "User verified successfully",
+    token,
+    user,
+  });
 });
 
+/**
+ * GET PROFILE
+ */
 export const myProfile = tryCatch(
   async (req: AuthenticatedRequest, res: Response) => {
-    const user = req.user;
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
+    if (!req.user) {
+      return res.status(401).json({ message: "Unauthorized" });
     }
-    res
-      .status(200)
-      .json({ message: "User profile fetched successfully", user });
-  },
+
+    return res.status(200).json({
+      message: "Profile fetched successfully",
+      user: req.user,
+    });
+  }
 );
 
+/**
+ * UPDATE NAME
+ */
 export const updateName = tryCatch(
   async (req: AuthenticatedRequest, res: Response) => {
-    const user = await User.findById(req.user?._id);
-    if (!user) {
-      return res.status(404).json({ message: "please login again" });
+    const { name } = req.body;
+
+    if (!name) {
+      return res.status(400).json({ message: "Name is required" });
     }
-    user.name = req.body.name;
-    await user.save();
-    const token = generateToken(user)
-    res
-      .status(200)
-      .json({ message: "User name updated successfully", token, user });
-  },
-);
 
-export const getAllUser = tryCatch(
-  async (req: AuthenticatedRequest, res: Response) => {
-    const users = await User.find();
-    res.status(200).json({ message: "All users fetched successfully", users });
-  },
-);
+    const user = await User.findById(req.user?._id);
 
-export const getAUser = tryCatch(
-  async (req: AuthenticatedRequest, res: Response) => {
-    const user = await User.findById(req.params.id);
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
-    res.status(200).json({ message: "User fetched successfully", user });
-  },
+
+    user.name = name;
+    await user.save();
+
+    const token = generateToken(user);
+
+    return res.status(200).json({
+      message: "Name updated successfully",
+      user,
+      token,
+    });
+  }
 );
 
+/**
+ * GET ALL USERS
+ */
+export const getAllUser = tryCatch(
+  async (_req: Request, res: Response) => {
+    const users = await User.find().select("-__v");
+
+    return res.status(200).json({
+      message: "Users fetched successfully",
+      users,
+    });
+  }
+);
+
+/**
+ * GET SINGLE USER
+ */
+export const getAUser = tryCatch(
+  async (req: Request, res: Response) => {
+    const user = await User.findById(req.params.id).select("-__v");
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    return res.status(200).json({
+      message: "User fetched successfully",
+      user,
+    });
+  }
+);
+
+/**
+ * LOGOUT
+ */
 export const logoutUser = tryCatch(
-  async (req: AuthenticatedRequest, res: Response) => {
+  async (_req: Request, res: Response) => {
     res.clearCookie("token");
-    res.status(200).json({ message: "User logged out successfully" });
-  },
+
+    return res.status(200).json({
+      message: "Logged out successfully",
+    });
+  }
 );

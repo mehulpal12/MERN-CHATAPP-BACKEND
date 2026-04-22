@@ -7,11 +7,18 @@ import { connectRabbitMQ } from "./config/rabbitmq.js";
 import cors from "cors";
 
 dotenv.config();
-
+// connect to the mongodb database
 connectDB();
 
-connectRabbitMQ()
+// Frontend → Backend → RabbitMQ → Worker → Database 
+// AMQP (Advanced Message Queuing Protocol)
+// Backend sends task to RabbitMQ → RabbitMQ queues it → worker processes it in background → backend responds immediately so user doesn’t wait
+connectRabbitMQ();
 
+
+//Get messages → Redis → fast response
+// Save messages to Redis for fast retrieval
+    
 export const redisClient = createClient(process.env.REDIS_URL ? { url: process.env.REDIS_URL } : {});
 
 

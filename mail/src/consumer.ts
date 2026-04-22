@@ -1,11 +1,23 @@
 import amqp from "amqplib";
+import nodemailer from "nodemailer";
+import dotenv from "dotenv";
 
-import nodemailer from "nodemailer"
-import dotenv from "dotenv"
 dotenv.config();
 
-// this is my job that is done by worker here 
-export const startSentOtpConsumer = async()=>{
+const transport = nodemailer.createTransport({
+    host: "smtp.gmail.com",
+    port: 465,
+    secure: true,
+    auth: {
+        user: process.env.USER,
+        pass: process.env.PASSWORD,
+    },
+    pool: true,
+    maxConnections: 1,
+    maxMessages: 5,
+});
+
+export const startSentOtpConsumer = async () => {
     try {
         const connection = await amqp.connect({
             protocol: "amqp",
@@ -13,42 +25,73 @@ export const startSentOtpConsumer = async()=>{
             port: 5672,
             username: process.env.RABBITMQ_USER,
             password: process.env.RABBITMQ_PASSWORD,
-        })
+        });
+
         const channel = await connection.createChannel();
+        const queueName = "send_otp";
 
-        const queueName = "send_otp"
-        await channel.assertQueue(queueName, {durable : true});
-        console.log("✅ Mail services consumer started, listening for otp emails");
+        await channel.assertQueue(queueName, { durable: true });
 
-        channel.consume(queueName, async(msg)=>{
-            if(msg){
-                try {
-                    const {to, subject, text} = JSON.parse(msg.content.toString());
-                    
-                    const transport = nodemailer.createTransport({
-                        host: 'smtp.gmail.com',
-                        port: 465,
-                        auth: {
-                            user: process.env.USER,
-                            pass: process.env.PASSWORD,
-                        },
-                    })
+        channel.prefetch(1);
 
-                    await transport.sendMail({
-                        from: `"Chat App" <${process.env.USER}>`,
-                        to,
-                        subject,
-                        text,
-                    })
-                    console.log(`✅ OTP email sent to ${to}`);
-                    channel.ack(msg);
-                } catch (error) {
-                    console.error("Failed to process otp email request", error);
-                    channel.nack(msg);
+        console.log("✅ Mail service started");
+
+        connection.on("close", () => {
+            console.log("🔁 Reconnecting...");
+            setTimeout(startSentOtpConsumer, 5000);
+        });
+
+        connection.on("error", (err) => {
+            console.error("❌ RabbitMQ error:", err);
+        });
+
+        channel.consume(queueName, async (msg) => {
+            if (!msg) return;
+
+            try {
+                const { to, subject, text } = JSON.parse(
+                    msg.content.toString()
+                );
+
+                if (!to || !subject || !text) {
+                    throw new Error("Invalid message");
                 }
+
+                await transport.sendMail({
+                    from: `"Chat App" <${process.env.USER}>`,
+                    to,
+                    subject,
+                    text,
+                });
+
+                console.log(`✅ OTP email sent to ${to}`);
+
+                channel.ack(msg);
+            } catch (error) {
+                const { to } = JSON.parse(msg.content.toString());
+                console.error(`❌ Email failed for ${to}`, error);
+
+                const headers = msg.properties.headers || {};
+                const retries = headers["x-retries"] || 0;
+
+                if (retries < 3) {
+                    const delay = Math.min(1000 * Math.pow(2, retries), 10000);
+                    await new Promise(res => setTimeout(res, delay));
+
+                    channel.sendToQueue(queueName, msg.content, {
+                        headers: { "x-retries": retries + 1 },
+                        persistent: true,
+                        contentType: msg.properties.contentType,
+                    });
+                } else {
+                    console.error(`❌ Message dropped after retries for ${to}`);
+                }
+
+                channel.ack(msg);
             }
-        })
+        });
     } catch (error) {
-        console.error("failed to connect to RabbitMQ", error);
+        console.error("❌ RabbitMQ connection failed", error);
+        setTimeout(startSentOtpConsumer, 5000);
     }
-}
+};
