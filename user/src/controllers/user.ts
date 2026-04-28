@@ -14,12 +14,7 @@ const generateOtp = () => {
   return crypto.randomInt(100000, 999999).toString();
 };
 
-/**
- * Hash OTP (never store plain OTP)
- */
-const hashOtp = (otp: string) => {
-  return crypto.createHash("sha256").update(otp).digest("hex");
-};
+
 
 /**
  * LOGIN (Send OTP)
@@ -44,10 +39,9 @@ export const loginUser = tryCatch(async (req: Request, res: Response) => {
 
   // Generate OTP
   const otp = generateOtp();
-  const hashedOtp = hashOtp(otp);
 
   // Store hashed OTP (1 minutes)
-  await redisClient.setEx(otpKey, 60, hashedOtp);
+  await redisClient.setEx(otpKey, 60, otp);
 
   // Rate limit (1 minutes)
   await redisClient.set(rateLimitKey, "true", { EX: 60 });
@@ -58,6 +52,7 @@ export const loginUser = tryCatch(async (req: Request, res: Response) => {
     subject: "OTP for Login",
     text: `Your OTP is ${otp}. It is valid for 5 minutes.`,
   });
+  console.log(`${email} otp is ${otp}`)
 
   return res.status(200).json({
     message: `OTP sent successfully ${otp}`,
@@ -85,9 +80,8 @@ export const verifyUser = tryCatch(async (req: Request, res: Response) => {
     });
   }
 
-  const hashedEnteredOtp = hashOtp(enteredOtp);
 
-  if (storedOtp !== hashedEnteredOtp) {
+  if (storedOtp !== enteredOtp) {
     return res.status(400).json({
       message: "Invalid OTP",
     });

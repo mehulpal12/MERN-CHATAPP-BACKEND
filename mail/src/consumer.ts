@@ -44,11 +44,11 @@ export const startSentOtpConsumer = async () => {
                 });
 
                 console.log(`✅ Email sent to ${to}`);
-
+                channel.prefetch(1);
                 channel.ack(msg);
             } catch (error) {
                 console.error("❌ Email failed:", error);
-                channel.nack(msg, false, false);
+                channel.nack(msg);
             }
         });
     } catch (error) {
