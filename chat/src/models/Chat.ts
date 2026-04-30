@@ -14,6 +14,7 @@ const chatSchema = new Schema<IChat>({
   users: {
     type: [String],
     required: true,
+    index: true
   },
   latestMessage: {
     text: {
@@ -25,5 +26,9 @@ const chatSchema = new Schema<IChat>({
   },
 
 }, {timestamps:true});
+
+
+
+
 
 export const Chat = mongoose.model<IChat>("Chat", chatSchema)

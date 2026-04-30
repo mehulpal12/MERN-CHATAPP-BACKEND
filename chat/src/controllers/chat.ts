@@ -4,6 +4,7 @@ import type { AuthenticatedRequest } from "../middlewares/isAuth.js";
 import { Chat } from "../models/Chat.js";
 import { Messages } from "../models/messages.js";
 import axios from "axios";
+import { generateSuggestions } from "../config/ai.js"
 import { io, getReciverSocketId } from "../config/socket.js";
 
 export const createChat = tryCatch(
@@ -53,11 +54,11 @@ export const getAllChats = tryCatch(
       chats.map(async (chat) => {
         const otherUserId = chat.users.find((id) => id.toString() !== userId.toString());
         const url = process.env.USER_SERVICE_URL as string;
-            if(!url){
-                console.log("url is not found")
-            }else{
-                console.log(url)
-            }
+        if (!url) {
+          console.log("url is not found")
+        } else {
+          console.log(url)
+        }
         const unseenCount = await Messages.countDocuments({
           chatId: chat._id,
           sender: { $ne: userId },
@@ -97,56 +98,59 @@ export const getAllChats = tryCatch(
   },
 );
 
-export const sendMessage = tryCatch(async(req:AuthenticatedRequest,res:Response)=>{
+export const sendMessage = tryCatch(async (req: AuthenticatedRequest, res: Response) => {
   const senderId = req.user?._id;
   if (!senderId) {
     res.status(401).json({ message: "User is not authenticated" });
     return;
   }
 
-  const {chatId,text} = req.body;
+  const { chatId, text } = req.body;
   const imageFile = req.file;
-  if(!chatId || !text){
+  if (!chatId) {
     res.status(400).json({
-      message:"chat and text id is required",
+      message: "chat id is required",
     })
     return;
+  }
+  if (!text && !imageFile) {
+    return res.status(400).json({ message: "Message cannot be empty" });
   }
   const chat = await Chat.findById(chatId);
-  if(!chat){
+  if (!chat) {
     res.status(404).json({
-      message:"chat not found",
+      message: "chat not found",
     })
     return;
   }
 
-  const isUserInChat = chat.users.some((id)=>id.toString() === senderId.toString());
-  if(!isUserInChat){
+  const isUserInChat = chat.users.some((id) => id.toString() === senderId.toString());
+  if (!isUserInChat) {
     res.status(403).json({
-      message:"user is not part of this chat",
+      message: "user is not part of this chat",
     })
     return;
   }
 
-  const otherUserId = chat.users.find((id)=>id.toString() !== senderId.toString());
-   if (!otherUserId) {
+  const otherUserId = chat.users.find((id) => id.toString() !== senderId.toString());
+  if (!otherUserId) {
     res.status(401).json({ message: "other user is not found" });
     return;
   }
 
   // socket.io setup
-  
-  const recieverSocketId  = getReciverSocketId(otherUserId.toString());
+
+  const recieverSocketId = getReciverSocketId(otherUserId.toString());
   let isRecieverInChatRoom = false
 
-  if(recieverSocketId){
+  if (recieverSocketId) {
     const recieverSocket = io.sockets.sockets.get(recieverSocketId)
-    if(recieverSocket && recieverSocket.rooms.has(chatId)){
+    if (recieverSocket && recieverSocket.rooms.has(chatId)) {
       isRecieverInChatRoom = true
     }
   }
 
-  
+
   const messagePayload: any = {
     chatId,
     sender: senderId,
@@ -160,46 +164,52 @@ export const sendMessage = tryCatch(async(req:AuthenticatedRequest,res:Response)
       url: (imageFile as any).path,
       public_id: (imageFile as any).filename,
     };
-    messagePayload.messageType = "image";
+
+    let messageType = "image";
+    if (text) {
+      messageType = "mixed";
+    }
+
+    messagePayload.messageType = messageType;
     messagePayload.text = text || "";
-  }else{
+  } else {
     messagePayload.messageType = "text";
     messagePayload.text = text;
   }
 
-  const messageData = await Messages.create(messagePayload);
+  // const messageData = await Messages.create(messagePayload);
 
-  const savedMessage = await messageData.save();
+  const savedMessage = await Messages.create(messagePayload);
 
   const latestMessageText = imageFile ? "image" : text;
 
-  await Chat.findByIdAndUpdate(chatId,{
-    latestMessage:{
-      text:latestMessageText,
-      sender:senderId,
+  await Chat.findByIdAndUpdate(chatId, {
+    latestMessage: {
+      text: latestMessageText,
+      sender: senderId,
     },
-    updatedAt:new Date(),
-  }, {new:true})
+    updatedAt: new Date(),
+  }, { returnDocument: 'after' })
 
   // emit to socket
 
   io.to(chatId).emit("newMessage", savedMessage)
 
-  if(recieverSocketId){
+  if (recieverSocketId) {
     io.to(recieverSocketId).emit("newMessage", savedMessage)
   }
 
   const senderSocketId = getReciverSocketId(senderId.toString())
 
-  if(senderSocketId){
+  if (senderSocketId) {
     io.to(senderSocketId).emit("newMessage", savedMessage)
   }
 
-  if(isRecieverInChatRoom &&  senderSocketId){
+  if (isRecieverInChatRoom && senderSocketId) {
     io.to(senderSocketId).emit("messageSeen", {
-      chatId:chatId,
-      seenBy:otherUserId,
-      messageIds:[savedMessage._id]
+      chatId: chatId,
+      seenBy: otherUserId,
+      messageIds: [savedMessage._id]
     })
   }
 
@@ -211,112 +221,179 @@ export const sendMessage = tryCatch(async(req:AuthenticatedRequest,res:Response)
 })
 
 
-export const getMessagesbyChat = tryCatch(async(req:AuthenticatedRequest,res:Response)=>{
-  const userId = req.user?._id;
-  if(!userId){
-    res.status(401).json({
-      message:"user is not authenticated",
-    })
-    return;
-  }
+export const getMessagesbyChat = tryCatch(
+  async (req: AuthenticatedRequest, res: Response) => {
+    const userId = req.user?._id;
 
-  const {chatId} = req.params;
-  if(!chatId){
-    res.status(400).json({
-      message:"chat id is required",
-    })
-    return;
-  }
+    if (!userId) {
+      return res.status(401).json({
+        message: "user is not authenticated",
+      });
+    }
 
-  const chat = await Chat.findById(chatId);
-  if(!chat){
-    res.status(404).json({
-      message:"chat not found",
-    })
-    return;
-  }
+    const { chatId } = req.params;
+    const { cursor, limit = 20 } = req.query;
 
-  const isUserInChat = chat.users.some((id)=>id.toString() === userId.toString());
-  if(!isUserInChat){
-    res.status(403).json({
-      message:"user is not part of this chat",
-    })
-    return;
-  }
+    if (!chatId) {
+      return res.status(400).json({
+        message: "chat id is required",
+      });
+    }
 
-  const unseenMessages = await Messages.find({
-    chatId,
-    sender: { $ne: userId },
-    seen: false,
-  });
+    const chat = await Chat.findById(chatId);
 
-  const messageIds = unseenMessages.map((msg) => msg._id.toString());
+    if (!chat) {
+      return res.status(404).json({
+        message: "chat not found",
+      });
+    }
 
-  if (messageIds.length > 0) {
-    await Messages.updateMany(
-      { _id: { $in: messageIds } },
-      {
-        $set: {
-          seen: true,
-          seenAt: new Date(),
-        },
-      }
+    const isUserInChat = chat.users.some(
+      (id) => id.toString() === userId.toString()
     );
 
-    const otherUserId = chat.users.find((id) => id.toString() !== userId.toString());
-    if (otherUserId) {
-      const otherUserSocketId = getReciverSocketId(otherUserId.toString());
+    if (!isUserInChat) {
+      return res.status(403).json({
+        message: "user is not part of this chat",
+      });
+    }
+
+    // 🔹 Build query with cursor pagination
+    const query: any = { chatId };
+
+    if (cursor) {
+      const parsedCursor = new Date(cursor as string);
+      if (!isNaN(parsedCursor.getTime())) {
+        query.createdAt = { $lt: parsedCursor };
+      }
+    }
+
+    // 🔹 Fetch messages (latest first)
+
+    const messages = await Messages.find(query)
+      .sort({ createdAt: -1 })
+
+    if (messages.length === 0) {
+      return res.status(200).json({
+        message: "no messages",
+        messages: [],
+        nextCursor: null,
+      });
+    }
+
+    // 🔹 Reverse for frontend (old → new)
+    const formattedMessages = messages.reverse();
+
+    const unseenMessageIds = messages
+      .filter(
+        (msg) =>
+          msg.sender.toString() !== userId.toString() && !msg.seen
+      )
+      .map((msg) => msg._id);
+
+    if (unseenMessageIds.length > 0) {
+      await Messages.updateMany(
+        { _id: { $in: unseenMessageIds } },
+        {
+          $set: {
+            seen: true,
+            seenAt: new Date(),
+          },
+        }
+      );
+    }
+
+    const otherUserId = chat.users.find(
+      (id) => id.toString() !== userId.toString()
+    );
+
+    // 🔹 Notify other user (seen update)
+    if (otherUserId && unseenMessageIds.length > 0) {
+      const otherUserSocketId = getReciverSocketId(
+        otherUserId.toString()
+      );
+
       if (otherUserSocketId) {
         io.to(otherUserSocketId).emit("messagesSeen", {
           chatId,
           seenBy: userId,
-          messageIds,
+          messageIds: unseenMessageIds,
         });
       }
     }
+
+    try {
+      const { data } = await axios.get(
+        `${process.env.USER_SERVICE_URL}/api/v1/user/${otherUserId}`,
+        {
+          headers: {
+            Authorization: req.headers.authorization as string,
+          },
+        }
+      );
+
+      return res.status(200).json({
+        message: "messages fetched successfully",
+        messages: formattedMessages,
+        otherUserId,
+        user: data.user,
+      });
+    } catch (err) {
+      console.log(err);
+
+      return res.status(500).json({
+        message: "internal server error",
+        user: {
+          _id: otherUserId,
+          name: "unknown user",
+        },
+      });
+    }
   }
+);
 
-  const messages = await Messages.find({ chatId }).sort({ createdAt: 1 });
-  const otherUserId = chat.users.find((id) => id.toString() !== userId.toString());
 
-  try {
-    const { data } = await axios.get(`${process.env.USER_SERVICE_URL}/api/v1/user/${otherUserId}`, {
-      headers: { Authorization: req.headers.authorization as string }
-    });
+export const getReplySuggestions = tryCatch(
+  async (req: AuthenticatedRequest, res: Response) => {
+    const userId = req.user?._id;
+    const { chatId } = req.params;
 
-    if (!otherUserId) {
-      res.status(400).json({
-        message: "other user not found",
-      })
-      return;
+    if (!userId) {
+      return res.status(401).json({ message: "Unauthorized" });
     }
 
+    const chat = await Chat.findById(chatId);
 
-    if(unseenMessages.length>0){
-      const otherUserSocketId = getReciverSocketId(otherUserId.toString())
-      if(otherUserSocketId){
-        io.to(otherUserSocketId).emit("messagesSeen",{
-          chatId:chatId,
-          seenBy:userId,
-          messageIds: unseenMessages.map((msg) => msg._id)
-        })
-      }
+    if (!chat) {
+      return res.status(404).json({ message: "Chat not found" });
     }
 
-    res.status(200).json({
-      message: "messages fetched successfully",
-      messages,
-      otherUserId,
-      user: data.user,
+    // ensure user belongs to chat
+    const isUserInChat = chat.users.some(
+      (id) => id.toString() === userId.toString()
+    );
+
+    if (!isUserInChat) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+
+    // 🔥 fetch last messages
+    const messages = await Messages.find({
+      chatId: chatId as string | string[] // Casting tells TS "I know what I'm doing"
     })
-  } catch (err) {
-    console.log(err);
-    res.status(500).json({
-      message:"internal server error",
-      user:{
-        _id: otherUserId,
-        name:"unknown user",
-      }
-    })
+      .sort({ createdAt: -1 })
+      .limit(5);
+
+    const context = messages
+      .map((m) => m.text)
+      .filter((text): text is string => Boolean(text))
+      .reverse(); // oldest → newest
+
+    // 🔥 generate suggestions
+    const suggestions = await generateSuggestions(context) as string[];
+
+    return res.status(200).json({ suggestions });
   }
-})
+);
+
+

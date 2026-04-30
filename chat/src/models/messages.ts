@@ -20,7 +20,8 @@ const schema = new Schema<IMessage>({
     chatId:{
         type: Schema.Types.ObjectId,
         ref:"Chat",
-        required:true
+        required:true,
+        index:true
     },
     sender:{
         type:String,
@@ -40,7 +41,8 @@ const schema = new Schema<IMessage>({
     },
     seen:{
         type:Boolean,
-        default:false
+        default:false,
+        index:true
     },
     seenAt:{
         type:Date,
@@ -50,5 +52,7 @@ const schema = new Schema<IMessage>({
 }, 
 {timestamps:true}
 )
+
+
 
 export const Messages = mongoose.model<IMessage>("Message",schema);

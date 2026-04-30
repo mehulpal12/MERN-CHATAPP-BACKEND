@@ -10,12 +10,9 @@ import type { AuthenticatedRequest } from "../middlewares/isAuth.js";
 /**
  * Generate secure OTP
  */
-const generateOtp = () => {
+const generateOtp = (): string => {
   return crypto.randomInt(100000, 999999).toString();
 };
-
-
-
 /**
  * LOGIN (Send OTP)
  */
@@ -52,7 +49,7 @@ export const loginUser = tryCatch(async (req: Request, res: Response) => {
     subject: "OTP for Login",
     text: `Your OTP is ${otp}. It is valid for 5 minutes.`,
   });
-  console.log(`${email} otp is ${otp}`)
+  console.log(`${email} otp is ${otp} fgg`)
 
   return res.status(200).json({
     message: `OTP sent successfully ${otp}`,
